@@ -1,0 +1,88 @@
+services:
+  cert-gen:
+    image: nginx:latest
+    command:
+      - /bin/sh
+      - -c
+      - |
+        [ -f /tmp/certs/ca/ca.crt ] && exit 0
+        mkdir /tmp/certs/ca /tmp/certs/server1 /tmp/certs/server2 /tmp/certs/client
+        openssl req -new -newkey rsa:2048 -days 365 -nodes -x509 -keyout /tmp/certs/ca/ca.key -out /tmp/certs/ca/ca.crt -subj "/C=SG/ST=SG/L=Singapore/O=F5/OU=NGINX/CN=ca.f5.com"
+
+        openssl req -new -newkey rsa:2048 -days 365 -nodes -keyout /tmp/certs/server1/server.key -out /tmp/certs/server1/server.csr -subj "/C=SG/ST=SG/L=Singapore/O=F5/OU=NGINX/CN=app1"
+        openssl x509 -req -in /tmp/certs/server1/server.csr -CA /tmp/certs/ca/ca.crt -CAkey /tmp/certs/ca/ca.key -CAcreateserial -out /tmp/certs/server1/server.crt -days 365
+
+        openssl req -new -newkey rsa:2048 -days 365 -nodes -keyout /tmp/certs/server2/server.key -out /tmp/certs/server2/server.csr -subj "/C=SG/ST=SG/L=Singapore/O=F5/OU=NGINX/CN=app2"
+        openssl x509 -req -in /tmp/certs/server2/server.csr -CA /tmp/certs/ca/ca.crt -CAkey /tmp/certs/ca/ca.key -CAcreateserial -out /tmp/certs/server2/server.crt -days 365
+
+        openssl req -new -newkey rsa:2048 -days 365 -nodes -keyout /tmp/certs/client/client.key -out /tmp/certs/client/client.csr -subj "/C=SG/ST=SG/L=Singapore/O=F5/OU=NGINX/CN=client"
+        openssl x509 -req -in /tmp/certs/client/client.csr -CA /tmp/certs/ca/ca.crt -CAkey /tmp/certs/ca/ca.key -CAcreateserial -out /tmp/certs/client/client.crt -days 365
+    volumes:
+      - ${PWD}/certs/:/tmp/certs/
+    profiles:
+      - init
+  app1:
+    build: ./server
+    volumes:
+      - ${PWD}/certs/server1:/usr/src/app/certs/
+      - ${PWD}/certs/ca:/usr/src/app/ca/
+    environment:
+      - SERVER_NAME=AppServer1
+      - MTLS=true
+      - HTTPS_PORT=443
+      - NTP_PORT=0
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost:443"]
+      interval: 3s
+    networks:
+      - external
+  app2:
+    build: ./server
+    volumes:
+      - ${PWD}/certs/server2:/usr/src/app/certs/
+      - ${PWD}/certs/ca:/usr/src/app/ca/
+    environment:
+      - SERVER_NAME=AppServer2
+      - MTLS=false
+      - HTTPS_PORT=8000
+      - NTP_PORT=123
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost:8000"]
+      interval: 3s
+    networks:
+      - external
+  nginx:
+    image: nginx:latest
+    volumes:
+      - ${PWD}/nginx/nginx.conf:/etc/nginx/nginx.conf
+    healthcheck:
+      test: ["CMD", "service", "nginx", "status"]
+      interval: 3s
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    networks:
+      - internal
+      - external
+  client:
+    build: ./client
+    command: /var/demo/test.sh
+    volumes:
+      - ${PWD}/certs/client/client.crt:/var/demo/client.crt
+      - ${PWD}/certs/client/client.key:/var/demo/client.key
+      - ${PWD}/certs/ca/ca.crt:/var/demo/ca.crt
+      - ${PWD}/client/test.sh:/var/demo/test.sh
+    networks:
+      - internal
+    links:
+      - "nginx:app1"
+      - "nginx:app2"
+    profiles:
+      - client
+networks:
+  internal:
+    internal: true
+  external:
+    internal: false
